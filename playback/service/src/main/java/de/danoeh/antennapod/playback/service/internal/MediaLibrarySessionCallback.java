@@ -434,10 +434,10 @@ public class MediaLibrarySessionCallback implements MediaLibraryService.MediaLib
         switch (parentId) {
             case MEDIA_ID_ROOT:
                 Single.fromCallable(() -> ImmutableList.of(
+                                createBrowsableMediaItem(MEDIA_ID_EPISODES),
                                 createBrowsableMediaItem(MEDIA_ID_CONTINUE_LISTENING),
                                 createBrowsableMediaItem(MEDIA_ID_QUEUE),
                                 createBrowsableMediaItem(MEDIA_ID_DOWNLOADS),
-                                createBrowsableMediaItem(MEDIA_ID_EPISODES),
                                 createBrowsableMediaItem(MEDIA_ID_SUBSCRIPTIONS)))
                         .subscribeOn(Schedulers.io())
                         .subscribe(items -> future.set(LibraryResult.ofItemList(items, params)),

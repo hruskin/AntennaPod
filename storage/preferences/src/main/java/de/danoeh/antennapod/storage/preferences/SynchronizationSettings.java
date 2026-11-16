@@ -10,6 +10,8 @@ public class SynchronizationSettings {
     private static final String LAST_SYNC_ATTEMPT_SUCCESS = "last_sync_attempt_success";
     private static final String LAST_EPISODE_ACTIONS_SYNC_TIMESTAMP = "last_episode_actions_sync_timestamp";
     private static final String LAST_SUBSCRIPTION_SYNC_TIMESTAMP = "last_sync_timestamp";
+    private static final String LAST_STATE_SYNC_TIMESTAMP = "last_state_sync_timestamp";
+    private static final String LAST_SYNCED_STATE_HASH = "last_synced_state_hash";
 
     private static SharedPreferences prefs;
 
@@ -26,6 +28,8 @@ public class SynchronizationSettings {
                 .putLong(LAST_SUBSCRIPTION_SYNC_TIMESTAMP, 0)
                 .putLong(LAST_EPISODE_ACTIONS_SYNC_TIMESTAMP, 0)
                 .putLong(LAST_SYNC_ATTEMPT_TIMESTAMP, 0)
+                .putLong(LAST_STATE_SYNC_TIMESTAMP, 0)
+                .putString(LAST_SYNCED_STATE_HASH, "")
                 .apply();
     }
 
@@ -67,5 +71,21 @@ public class SynchronizationSettings {
 
     public static void setLastEpisodeActionSynchronizationAttemptTimestamp(long timestamp) {
         prefs.edit().putLong(LAST_EPISODE_ACTIONS_SYNC_TIMESTAMP, timestamp).apply();
+    }
+
+    public static long getLastStateSyncTimestamp() {
+        return prefs.getLong(LAST_STATE_SYNC_TIMESTAMP, 0);
+    }
+
+    public static void setLastStateSyncTimestamp(long timestamp) {
+        prefs.edit().putLong(LAST_STATE_SYNC_TIMESTAMP, timestamp).apply();
+    }
+
+    public static String getLastSyncedStateHash() {
+        return prefs.getString(LAST_SYNCED_STATE_HASH, "");
+    }
+
+    public static void setLastSyncedStateHash(String hash) {
+        prefs.edit().putString(LAST_SYNCED_STATE_HASH, hash).apply();
     }
 }

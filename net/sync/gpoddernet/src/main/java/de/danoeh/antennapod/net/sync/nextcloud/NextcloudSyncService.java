@@ -157,6 +157,32 @@ public class NextcloudSyncService implements ISyncService {
     public void logout() {
     }
 
+    public JSONObject getRemoteState() throws SyncServiceException {
+        try {
+            HttpUrl.Builder url = makeUrl("/index.php/apps/gpoddersync/state");
+            String responseString = performRequest(url, "GET", null);
+            return new JSONObject(responseString);
+        } catch (Exception e) {
+            throw new SyncServiceException(e);
+        }
+    }
+
+    public long uploadState(JSONArray queueArray, JSONArray favoritesArray)
+            throws NextcloudSynchronizationServiceException {
+        try {
+            HttpUrl.Builder url = makeUrl("/index.php/apps/gpoddersync/state");
+            JSONObject body = new JSONObject();
+            body.put("queue", queueArray);
+            body.put("favorites", favoritesArray);
+            RequestBody requestBody = RequestBody.create(body.toString(), MediaType.get("application/json"));
+            String responseString = performRequest(url, "POST", requestBody);
+            JSONObject json = new JSONObject(responseString);
+            return json.optLong("timestamp", System.currentTimeMillis() / 1000);
+        } catch (Exception e) {
+            throw new NextcloudSynchronizationServiceException(e);
+        }
+    }
+
     private static class NextcloudGpodderEpisodeActionPostResponse extends UploadChangesResponse {
         public NextcloudGpodderEpisodeActionPostResponse(long epochSecond) {
             super(epochSecond);

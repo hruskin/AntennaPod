@@ -16,6 +16,7 @@ import androidx.work.Worker;
 import androidx.work.WorkerParameters;
 import de.danoeh.antennapod.event.FeedUpdateRunningEvent;
 import de.danoeh.antennapod.event.MessageEvent;
+import de.danoeh.antennapod.event.QueueEvent;
 import de.danoeh.antennapod.event.SyncServiceEvent;
 import de.danoeh.antennapod.model.feed.Feed;
 import de.danoeh.antennapod.model.feed.FeedItem;
@@ -39,17 +40,23 @@ import de.danoeh.antennapod.storage.database.DBReader;
 import de.danoeh.antennapod.storage.database.DBWriter;
 import de.danoeh.antennapod.storage.database.FeedDatabaseWriter;
 import de.danoeh.antennapod.storage.database.LongList;
+import de.danoeh.antennapod.storage.database.PodDBAdapter;
 import de.danoeh.antennapod.storage.preferences.SynchronizationCredentials;
 import de.danoeh.antennapod.storage.preferences.SynchronizationSettings;
 import de.danoeh.antennapod.storage.preferences.UserPreferences;
 import de.danoeh.antennapod.ui.notifications.NotificationUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.greenrobot.eventbus.EventBus;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class SyncService extends Worker {
     public static final String TAG = "SyncService";
@@ -87,6 +94,9 @@ public class SyncService extends Worker {
                 return Result.success();
             }
             syncEpisodeActions(activeSyncProvider);
+            if (activeSyncProvider instanceof NextcloudSyncService) {
+                syncQueueAndFavorites((NextcloudSyncService) activeSyncProvider);
+            }
             activeSyncProvider.logout();
             clearErrorNotifications();
             EventBus.getDefault().postSticky(new SyncServiceEvent(R.string.sync_status_success));
@@ -260,6 +270,117 @@ public class SyncService extends Worker {
             }
         }
         SynchronizationSettings.setLastEpisodeActionSynchronizationAttemptTimestamp(newTimeStamp);
+    }
+
+    private void syncQueueAndFavorites(NextcloudSyncService syncService) {
+        try {
+            List<FeedItem> localQueue = DBReader.getQueue();
+            List<FeedItem> localFavorites = DBReader.getEpisodes(0, Integer.MAX_VALUE,
+                    new FeedItemFilter(FeedItemFilter.IS_FAVORITE), SortOrder.DATE_NEW_OLD);
+            JSONArray localQueueJson = buildStateArray(localQueue);
+            JSONArray localFavJson = buildStateArray(localFavorites);
+            String currentHash = localQueueJson.toString() + "|" + localFavJson.toString();
+
+            JSONObject remoteState = syncService.getRemoteState();
+            long remoteTimestamp = remoteState.optLong("timestamp", 0);
+            long lastStateTimestamp = SynchronizationSettings.getLastStateSyncTimestamp();
+            String lastHash = SynchronizationSettings.getLastSyncedStateHash();
+
+            boolean shouldUpload = (lastStateTimestamp == 0 && remoteTimestamp == 0
+                    && (!localQueue.isEmpty() || !localFavorites.isEmpty()))
+                    || (lastStateTimestamp > 0 && !currentHash.equals(lastHash));
+
+            if (shouldUpload) {
+                long newTs = syncService.uploadState(localQueueJson, localFavJson);
+                SynchronizationSettings.setLastStateSyncTimestamp(newTs);
+                SynchronizationSettings.setLastSyncedStateHash(currentHash);
+            } else if (remoteTimestamp > lastStateTimestamp) {
+                List<FeedItem> newFavorites = resolveFeedItems(remoteState.optJSONArray("favorites"));
+                applyRemoteFavorites(localFavorites, newFavorites);
+
+                List<FeedItem> newQueue = resolveFeedItems(remoteState.optJSONArray("queue"));
+                PodDBAdapter adapter = PodDBAdapter.getInstance();
+                adapter.open();
+                adapter.setQueue(newQueue);
+                adapter.close();
+                EventBus.getDefault().post(QueueEvent.setQueue(newQueue));
+
+                List<FeedItem> updatedQueue = DBReader.getQueue();
+                List<FeedItem> updatedFavorites = DBReader.getEpisodes(0, Integer.MAX_VALUE,
+                        new FeedItemFilter(FeedItemFilter.IS_FAVORITE), SortOrder.DATE_NEW_OLD);
+                String updatedHash = buildStateArray(updatedQueue).toString()
+                        + "|" + buildStateArray(updatedFavorites).toString();
+                SynchronizationSettings.setLastStateSyncTimestamp(remoteTimestamp);
+                SynchronizationSettings.setLastSyncedStateHash(updatedHash);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Skipping queue and favorites sync: " + e.getMessage());
+        }
+    }
+
+    private JSONArray buildStateArray(List<FeedItem> items) throws JSONException {
+        JSONArray array = new JSONArray();
+        for (FeedItem item : items) {
+            if (item.getFeed() == null || item.getFeed().isLocalFeed() || item.getMedia() == null) {
+                continue;
+            }
+            JSONObject obj = new JSONObject();
+            obj.put("podcast", item.getFeed().getDownloadUrl());
+            obj.put("episode", item.getMedia().getDownloadUrl());
+            obj.put("guid", item.getItemIdentifier());
+            array.put(obj);
+        }
+        return array;
+    }
+
+    private List<FeedItem> resolveFeedItems(JSONArray jsonArray) {
+        List<FeedItem> items = new ArrayList<>();
+        if (jsonArray == null) {
+            return items;
+        }
+        for (int i = 0; i < jsonArray.length(); i++) {
+            JSONObject obj = jsonArray.optJSONObject(i);
+            if (obj == null) {
+                continue;
+            }
+            String episode = obj.optString("episode", "");
+            String guid = obj.optString("guid", "");
+            String validGuid = GuidValidator.isValidGuid(guid) ? guid : null;
+            FeedItem feedItem = DBReader.getFeedItemByGuidOrEpisodeUrl(validGuid, episode);
+            if (feedItem != null) {
+                items.add(feedItem);
+            }
+        }
+        return items;
+    }
+
+    private void applyRemoteFavorites(List<FeedItem> localFavorites, List<FeedItem> remoteFavorites) throws Exception {
+        Set<Long> remoteIds = new HashSet<>();
+        for (FeedItem item : remoteFavorites) {
+            remoteIds.add(item.getId());
+        }
+        Set<Long> localIds = new HashSet<>();
+        for (FeedItem item : localFavorites) {
+            localIds.add(item.getId());
+        }
+        List<FeedItem> toAdd = new ArrayList<>();
+        for (FeedItem item : remoteFavorites) {
+            if (!localIds.contains(item.getId())) {
+                toAdd.add(item);
+            }
+        }
+        List<FeedItem> toRemove = new ArrayList<>();
+        for (FeedItem item : localFavorites) {
+            if (!remoteIds.contains(item.getId())) {
+                toRemove.add(item);
+            }
+        }
+        if (!toAdd.isEmpty()) {
+            DBWriter.addFavoriteItems(toAdd).get();
+        }
+        if (!toRemove.isEmpty()) {
+            DBWriter.removeFavoriteItems(toRemove).get();
+        }
     }
 
     private synchronized void processEpisodeActions(List<EpisodeAction> remoteActions) {

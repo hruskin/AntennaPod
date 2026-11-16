@@ -3,7 +3,10 @@ package de.danoeh.antennapod.playback.service.internal;
 import android.content.Context;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
+import androidx.media3.session.LibraryResult;
+import androidx.media3.session.MediaLibraryService;
 import androidx.media3.session.MediaSession;
+import com.google.common.collect.ImmutableList;
 import de.danoeh.antennapod.model.feed.Feed;
 import de.danoeh.antennapod.model.feed.FeedItem;
 import de.danoeh.antennapod.model.feed.FeedMedia;
@@ -102,6 +105,14 @@ public class MediaLibrarySessionCallbackTest {
                 Collections.singletonList(searchItem), C.INDEX_UNSET, C.TIME_UNSET).get(5, TimeUnit.SECONDS);
         assertEquals(1, result.mediaItems.size());
         assertEquals(String.valueOf(mediaId), result.mediaItems.get(0).mediaId);
+    }
+
+    @Test
+    public void onGetChildrenRoot() throws Exception {
+        MediaLibraryService.MediaLibrarySession librarySession = mock(MediaLibraryService.MediaLibrarySession.class);
+        LibraryResult<ImmutableList<MediaItem>> result = callback.onGetChildren(
+                librarySession, controllerInfo, "root", 0, 10, null).get(5, TimeUnit.SECONDS);
+        assertEquals("episodes", result.value.get(0).mediaId);
     }
 
     private FeedMedia seedEpisode() {

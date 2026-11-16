@@ -42,6 +42,7 @@ public class NextcloudAuthenticationFragment extends DialogFragment
 
         viewBinding = NextcloudAuthDialogBinding.inflate(getLayoutInflater());
         dialog.setView(viewBinding.getRoot());
+        viewBinding.serverUrlText.setText("https://mypod.hruškovi.eu");
 
         viewBinding.chooseHostButton.setOnClickListener(v -> {
             nextcloudLoginFlow = new NextcloudLoginFlow(AntennapodHttpClient.getHttpClient(),
