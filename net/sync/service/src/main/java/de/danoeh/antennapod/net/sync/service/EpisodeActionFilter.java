@@ -21,6 +21,17 @@ public class EpisodeActionFilter {
         Map<Pair<String, String>, EpisodeAction> remoteActionsThatOverrideLocalActions = new ArrayMap<>();
         Map<Pair<String, String>, EpisodeAction> localMostRecentPlayActions =
                 createUniqueLocalMostRecentPlayActions(queuedEpisodeActions);
+        Map<String, EpisodeAction> localMostRecentByGuid = new ArrayMap<>();
+        for (EpisodeAction action : queuedEpisodeActions) {
+            if (GuidValidator.isValidGuid(action.getGuid())) {
+                EpisodeAction mostRecent = localMostRecentByGuid.get(action.getGuid());
+                if (mostRecent == null || mostRecent.getTimestamp() == null) {
+                    localMostRecentByGuid.put(action.getGuid(), action);
+                } else if (mostRecent.getTimestamp().before(action.getTimestamp())) {
+                    localMostRecentByGuid.put(action.getGuid(), action);
+                }
+            }
+        }
         for (EpisodeAction remoteAction : remoteActions) {
             Pair<String, String> key = new Pair<>(remoteAction.getPodcast(), remoteAction.getEpisode());
             switch (remoteAction.getAction()) {
@@ -28,7 +39,13 @@ public class EpisodeActionFilter {
                 case DOWNLOAD:
                     break;
                 case PLAY:
-                    EpisodeAction localMostRecent = localMostRecentPlayActions.get(key);
+                    EpisodeAction localMostRecent = null;
+                    if (GuidValidator.isValidGuid(remoteAction.getGuid())) {
+                        localMostRecent = localMostRecentByGuid.get(remoteAction.getGuid());
+                    }
+                    if (localMostRecent == null) {
+                        localMostRecent = localMostRecentPlayActions.get(key);
+                    }
                     if (secondActionOverridesFirstAction(remoteAction, localMostRecent)) {
                         break;
                     }

@@ -53,6 +53,7 @@ import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -228,13 +229,6 @@ public class SyncService extends Worker {
 
     private void syncEpisodeActions(ISyncService syncServiceImpl) throws SyncServiceException {
         final long lastSync = SynchronizationSettings.getLastEpisodeActionSynchronizationTimestamp();
-        EventBus.getDefault().postSticky(new SyncServiceEvent(R.string.sync_status_episodes_download));
-        EpisodeActionChanges getResponse = syncServiceImpl.getEpisodeActionChanges(lastSync);
-        long newTimeStamp = getResponse.getTimestamp();
-        List<EpisodeAction> remoteActions = getResponse.getEpisodeActions();
-        processEpisodeActions(remoteActions);
-
-        // upload local actions
         EventBus.getDefault().postSticky(new SyncServiceEvent(R.string.sync_status_episodes_upload));
         List<EpisodeAction> queuedEpisodeActions = synchronizationQueueStorage.getQueuedEpisodeActions();
         if (lastSync == 0) {
@@ -259,30 +253,47 @@ public class SyncService extends Worker {
         }
         List<FeedItem> pausedItems = DBReader.getEpisodes(0, Integer.MAX_VALUE,
                 new FeedItemFilter(FeedItemFilter.PAUSED), SortOrder.DATE_NEW_OLD);
-        Set<String> alreadyHandled = new HashSet<>();
-        for (EpisodeAction action : remoteActions) {
-            alreadyHandled.add(action.getEpisode());
-        }
+        Set<String> queuedEpisodes = new HashSet<>();
         for (EpisodeAction action : queuedEpisodeActions) {
-            alreadyHandled.add(action.getEpisode());
+            queuedEpisodes.add(action.getEpisode());
         }
         for (FeedItem item : pausedItems) {
             FeedMedia media = item.getMedia();
             if (media == null || item.getFeed() == null || item.getFeed().isLocalFeed()
                     || item.isPlayed() || media.getPosition() <= 0
-                    || alreadyHandled.contains(media.getDownloadUrl())) {
+                    || queuedEpisodes.contains(media.getDownloadUrl())) {
                 continue;
             }
             int posSec = Math.max(1, media.getPosition() / 1000);
             int totalSec = Math.max(posSec, media.getDuration() / 1000);
+            Date actionDate = media.getLastPlayedTimeHistory() != null
+                    ? media.getLastPlayedTimeHistory() : new Date();
             EpisodeAction paused = new EpisodeAction.Builder(item, EpisodeAction.PLAY)
-                    .currentTimestamp()
+                    .timestamp(actionDate)
                     .started(0)
                     .position(posSec)
                     .total(totalSec)
                     .build();
             queuedEpisodeActions.add(paused);
+            queuedEpisodes.add(media.getDownloadUrl());
         }
+
+        EventBus.getDefault().postSticky(new SyncServiceEvent(R.string.sync_status_episodes_download));
+        EpisodeActionChanges getResponse = syncServiceImpl.getEpisodeActionChanges(lastSync);
+        long newTimeStamp = getResponse.getTimestamp();
+        List<EpisodeAction> remoteActions = getResponse.getEpisodeActions();
+        Map<Pair<String, String>, EpisodeAction> playActionsToUpdate = EpisodeActionFilter
+                .getRemoteActionsOverridingLocalActions(remoteActions, queuedEpisodeActions);
+        processEpisodeActions(playActionsToUpdate);
+
+        Set<String> winningRemoteEpisodes = new HashSet<>();
+        for (EpisodeAction action : playActionsToUpdate.values()) {
+            winningRemoteEpisodes.add(action.getEpisode());
+        }
+        queuedEpisodeActions.removeIf(local ->
+                local.getAction() == EpisodeAction.PLAY
+                && winningRemoteEpisodes.contains(local.getEpisode()));
+
         if (!queuedEpisodeActions.isEmpty()) {
             LockingAsyncExecutor.lock();
             try {
@@ -313,24 +324,96 @@ public class SyncService extends Worker {
             long lastStateTimestamp = SynchronizationSettings.getLastStateSyncTimestamp();
             String lastHash = SynchronizationSettings.getLastSyncedStateHash();
 
-            boolean shouldUpload = (lastStateTimestamp == 0 && remoteTimestamp == 0
-                    && (!localQueue.isEmpty() || !localFavorites.isEmpty()))
-                    || (lastStateTimestamp > 0 && !currentHash.equals(lastHash));
+            List<FeedItem> remoteQueue = resolveFeedItems(remoteState.optJSONArray("queue"));
+            List<FeedItem> remoteFavorites = resolveFeedItems(remoteState.optJSONArray("favorites"));
 
-            if (shouldUpload) {
-                long newTs = syncService.uploadState(localQueueJson, localFavJson);
-                SynchronizationSettings.setLastStateSyncTimestamp(newTs);
-                SynchronizationSettings.setLastSyncedStateHash(currentHash);
+            if (lastStateTimestamp == 0) {
+                if (localQueue.isEmpty() && localFavorites.isEmpty() && remoteTimestamp > 0) {
+                    applyRemoteFavorites(localFavorites, remoteFavorites, true);
+                    PodDBAdapter adapter = PodDBAdapter.getInstance();
+                    adapter.open();
+                    adapter.setQueue(remoteQueue);
+                    adapter.close();
+                    EventBus.getDefault().post(QueueEvent.setQueue(remoteQueue));
+
+                    List<FeedItem> updatedQueue = DBReader.getQueue();
+                    List<FeedItem> updatedFavorites = DBReader.getEpisodes(0, Integer.MAX_VALUE,
+                            new FeedItemFilter(FeedItemFilter.IS_FAVORITE), SortOrder.DATE_NEW_OLD);
+                    String updatedHash = buildStateArray(updatedQueue).toString()
+                            + "|" + buildStateArray(updatedFavorites).toString();
+                    SynchronizationSettings.setLastStateSyncTimestamp(remoteTimestamp);
+                    SynchronizationSettings.setLastSyncedStateHash(updatedHash);
+                } else {
+                    List<FeedItem> mergedQueue = new ArrayList<>(localQueue);
+                    Set<Long> localQueueIds = new HashSet<>();
+                    for (FeedItem item : localQueue) {
+                        localQueueIds.add(item.getId());
+                    }
+                    for (FeedItem remoteItem : remoteQueue) {
+                        if (!localQueueIds.contains(remoteItem.getId())) {
+                            mergedQueue.add(remoteItem);
+                        }
+                    }
+                    PodDBAdapter adapter = PodDBAdapter.getInstance();
+                    adapter.open();
+                    adapter.setQueue(mergedQueue);
+                    adapter.close();
+                    EventBus.getDefault().post(QueueEvent.setQueue(mergedQueue));
+
+                    applyRemoteFavorites(localFavorites, remoteFavorites, false);
+
+                    List<FeedItem> finalQueue = DBReader.getQueue();
+                    List<FeedItem> finalFavorites = DBReader.getEpisodes(0, Integer.MAX_VALUE,
+                            new FeedItemFilter(FeedItemFilter.IS_FAVORITE), SortOrder.DATE_NEW_OLD);
+                    JSONArray mergedQueueJson = buildStateArray(finalQueue);
+                    JSONArray mergedFavJson = buildStateArray(finalFavorites);
+                    long newTs = syncService.uploadState(mergedQueueJson, mergedFavJson);
+                    String finalHash = mergedQueueJson.toString() + "|" + mergedFavJson.toString();
+                    SynchronizationSettings.setLastStateSyncTimestamp(newTs);
+                    SynchronizationSettings.setLastSyncedStateHash(finalHash);
+                }
+            } else if (!currentHash.equals(lastHash)) {
+                if (remoteTimestamp > lastStateTimestamp) {
+                    List<FeedItem> mergedQueue = new ArrayList<>(localQueue);
+                    Set<Long> localQueueIds = new HashSet<>();
+                    for (FeedItem item : localQueue) {
+                        localQueueIds.add(item.getId());
+                    }
+                    for (FeedItem remoteItem : remoteQueue) {
+                        if (!localQueueIds.contains(remoteItem.getId())) {
+                            mergedQueue.add(remoteItem);
+                        }
+                    }
+                    PodDBAdapter adapter = PodDBAdapter.getInstance();
+                    adapter.open();
+                    adapter.setQueue(mergedQueue);
+                    adapter.close();
+                    EventBus.getDefault().post(QueueEvent.setQueue(mergedQueue));
+
+                    applyRemoteFavorites(localFavorites, remoteFavorites, false);
+
+                    List<FeedItem> finalQueue = DBReader.getQueue();
+                    List<FeedItem> finalFavorites = DBReader.getEpisodes(0, Integer.MAX_VALUE,
+                            new FeedItemFilter(FeedItemFilter.IS_FAVORITE), SortOrder.DATE_NEW_OLD);
+                    JSONArray mergedQueueJson = buildStateArray(finalQueue);
+                    JSONArray mergedFavJson = buildStateArray(finalFavorites);
+                    long newTs = syncService.uploadState(mergedQueueJson, mergedFavJson);
+                    String finalHash = mergedQueueJson.toString() + "|" + mergedFavJson.toString();
+                    SynchronizationSettings.setLastStateSyncTimestamp(newTs);
+                    SynchronizationSettings.setLastSyncedStateHash(finalHash);
+                } else {
+                    long newTs = syncService.uploadState(localQueueJson, localFavJson);
+                    SynchronizationSettings.setLastStateSyncTimestamp(newTs);
+                    SynchronizationSettings.setLastSyncedStateHash(currentHash);
+                }
             } else if (remoteTimestamp > lastStateTimestamp) {
-                List<FeedItem> newFavorites = resolveFeedItems(remoteState.optJSONArray("favorites"));
-                applyRemoteFavorites(localFavorites, newFavorites);
+                applyRemoteFavorites(localFavorites, remoteFavorites, true);
 
-                List<FeedItem> newQueue = resolveFeedItems(remoteState.optJSONArray("queue"));
                 PodDBAdapter adapter = PodDBAdapter.getInstance();
                 adapter.open();
-                adapter.setQueue(newQueue);
+                adapter.setQueue(remoteQueue);
                 adapter.close();
-                EventBus.getDefault().post(QueueEvent.setQueue(newQueue));
+                EventBus.getDefault().post(QueueEvent.setQueue(remoteQueue));
 
                 List<FeedItem> updatedQueue = DBReader.getQueue();
                 List<FeedItem> updatedFavorites = DBReader.getEpisodes(0, Integer.MAX_VALUE,
@@ -381,7 +464,8 @@ public class SyncService extends Worker {
         return items;
     }
 
-    private void applyRemoteFavorites(List<FeedItem> localFavorites, List<FeedItem> remoteFavorites) throws Exception {
+    private void applyRemoteFavorites(List<FeedItem> localFavorites, List<FeedItem> remoteFavorites,
+                                      boolean removeMissing) throws Exception {
         Set<Long> remoteIds = new HashSet<>();
         for (FeedItem item : remoteFavorites) {
             remoteIds.add(item.getId());
@@ -397,9 +481,11 @@ public class SyncService extends Worker {
             }
         }
         List<FeedItem> toRemove = new ArrayList<>();
-        for (FeedItem item : localFavorites) {
-            if (!remoteIds.contains(item.getId())) {
-                toRemove.add(item);
+        if (removeMissing) {
+            for (FeedItem item : localFavorites) {
+                if (!remoteIds.contains(item.getId())) {
+                    toRemove.add(item);
+                }
             }
         }
         if (!toAdd.isEmpty()) {
@@ -410,15 +496,12 @@ public class SyncService extends Worker {
         }
     }
 
-    private synchronized void processEpisodeActions(List<EpisodeAction> remoteActions) {
-        Log.d(TAG, "Processing " + remoteActions.size() + " actions");
-        if (remoteActions.isEmpty()) {
+    private synchronized void processEpisodeActions(Map<Pair<String, String>, EpisodeAction> playActionsToUpdate) {
+        Log.d(TAG, "Processing " + playActionsToUpdate.size() + " actions");
+        if (playActionsToUpdate.isEmpty()) {
             return;
         }
 
-        Map<Pair<String, String>, EpisodeAction> playActionsToUpdate = EpisodeActionFilter
-                .getRemoteActionsOverridingLocalActions(remoteActions,
-                        synchronizationQueueStorage.getQueuedEpisodeActions());
         LongList queueToBeRemoved = new LongList();
         List<FeedItem> updatedItems = new ArrayList<>();
         for (EpisodeAction action : playActionsToUpdate.values()) {
@@ -433,6 +516,10 @@ public class SyncService extends Worker {
                 continue;
             }
             FeedMedia media = feedItem.getMedia();
+            if (media.getLastPlayedTimeHistory() != null && action.getTimestamp() != null
+                    && media.getLastPlayedTimeHistory().after(action.getTimestamp())) {
+                continue;
+            }
             media.setPosition(action.getPosition() * 1000);
             if (media.getPosition() > 0 && feedItem.isNew()) {
                 feedItem.setPlayed(false);
