@@ -411,6 +411,7 @@ public class Media3PlaybackService extends MediaLibraryService {
                 if (currentPlayable != null) {
                     SynchronizationQueue.getInstance().enqueueEpisodePlayed(currentPlayable,
                             playbackStartPosition, false);
+                    playbackStartPosition = Math.max(currentPlayable.getPosition(), 0);
                 }
             }
             WidgetUpdater.WidgetState widgetState = new WidgetUpdater.WidgetState(currentPlayable,

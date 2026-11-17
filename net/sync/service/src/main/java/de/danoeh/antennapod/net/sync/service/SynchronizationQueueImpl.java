@@ -121,14 +121,21 @@ public class SynchronizationQueueImpl extends SynchronizationQueue {
                 || media.getItem().getFeed().getState() == Feed.STATE_NOT_SUBSCRIBED) {
             return;
         }
-        if (startPosition < 0 || (!completed && startPosition >= media.getPosition())) {
+        int validStart = Math.max(0, startPosition);
+        if (!completed && startPosition >= 0 && startPosition == media.getPosition()) {
             return;
         }
+        int positionSec = completed
+                ? Math.max(1, media.getDuration() / 1000)
+                : Math.max(0, media.getPosition() / 1000);
+        int totalSec = completed
+                ? Math.max(1, media.getDuration() / 1000)
+                : Math.max(positionSec, media.getDuration() / 1000);
         EpisodeAction action = new EpisodeAction.Builder(media.getItem(), EpisodeAction.PLAY)
                 .currentTimestamp()
-                .started(startPosition / 1000)
-                .position((completed ? media.getDuration() : media.getPosition()) / 1000)
-                .total(media.getDuration() / 1000)
+                .started(validStart / 1000)
+                .position(positionSec)
+                .total(totalSec)
                 .build();
         enqueueEpisodeAction(action);
     }

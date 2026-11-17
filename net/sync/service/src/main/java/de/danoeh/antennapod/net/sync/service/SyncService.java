@@ -244,17 +244,44 @@ public class SyncService extends Worker {
             Log.d(TAG, "First sync. Upload state for all " + readItems.size() + " played episodes");
             for (FeedItem item : readItems) {
                 FeedMedia media = item.getMedia();
-                if (media == null) {
+                if (media == null || item.getFeed() == null || item.getFeed().isLocalFeed()) {
                     continue;
                 }
+                int durationSec = Math.max(1, media.getDuration() / 1000);
                 EpisodeAction played = new EpisodeAction.Builder(item, EpisodeAction.PLAY)
                         .currentTimestamp()
-                        .started(media.getDuration() / 1000)
-                        .position(media.getDuration() / 1000)
-                        .total(media.getDuration() / 1000)
+                        .started(durationSec)
+                        .position(durationSec)
+                        .total(durationSec)
                         .build();
                 queuedEpisodeActions.add(played);
             }
+        }
+        List<FeedItem> pausedItems = DBReader.getEpisodes(0, Integer.MAX_VALUE,
+                new FeedItemFilter(FeedItemFilter.PAUSED), SortOrder.DATE_NEW_OLD);
+        Set<String> alreadyHandled = new HashSet<>();
+        for (EpisodeAction action : remoteActions) {
+            alreadyHandled.add(action.getEpisode());
+        }
+        for (EpisodeAction action : queuedEpisodeActions) {
+            alreadyHandled.add(action.getEpisode());
+        }
+        for (FeedItem item : pausedItems) {
+            FeedMedia media = item.getMedia();
+            if (media == null || item.getFeed() == null || item.getFeed().isLocalFeed()
+                    || item.isPlayed() || media.getPosition() <= 0
+                    || alreadyHandled.contains(media.getDownloadUrl())) {
+                continue;
+            }
+            int posSec = Math.max(1, media.getPosition() / 1000);
+            int totalSec = Math.max(posSec, media.getDuration() / 1000);
+            EpisodeAction paused = new EpisodeAction.Builder(item, EpisodeAction.PLAY)
+                    .currentTimestamp()
+                    .started(0)
+                    .position(posSec)
+                    .total(totalSec)
+                    .build();
+            queuedEpisodeActions.add(paused);
         }
         if (!queuedEpisodeActions.isEmpty()) {
             LockingAsyncExecutor.lock();
